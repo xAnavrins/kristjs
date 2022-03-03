@@ -11,8 +11,7 @@ const Transaction = require("./classes/Transaction")
 
 const HEADERS = {
     "Content-Type": "application/json",
-    "Origin": "Anav's KristJS",
-    "User-Agent": "node-fetch/2.0",
+    "Origin": "Krist.JS",
 }
 
 class Krist extends EventEmitter {
@@ -42,7 +41,7 @@ class Krist extends EventEmitter {
             Fetch(this.node_url + "/ws/start", opts)
             .then(res => res.json())
             .then(res => {
-                this.handle = new Websocket(res.url)
+                this.handle = new Websocket(res.url, { headers: HEADERS })
 
                 this.handle.on("message", this._onMessage.bind(this))
 
@@ -87,20 +86,22 @@ class Krist extends EventEmitter {
                 this.currentBlock = new Block(data.last_block)
                 this.currentWork = data.work
 
-                // I'd rather not have any default subscriptions
                 this._wsSend({"type": "me"})
                 .then(res => {
                     if (res.address) { this.address = new Address(res.address) }
                     this.isGuest = res.isGuest
-                    return this.getStake()
-                })
-                .then(this.unsubscribe("ownTransactions"))
-                .then(this.unsubscribe("blocks"))
-                .then(this.unsubscribe("ownStake").catch(() => {}))
-                .catch(() => {})
-                .finally(() => {
-                    this.running = true
-                    this.emit("ready")
+                    
+                    Promise.allSettled([
+                        // I'd rather not have any default subscriptions
+                        this.unsubscribe("blocks"),
+                        this.unsubscribe("ownStake"),
+                        this.unsubscribe("ownTransactions"),
+                        this.getStake()
+                    ])
+                    .then(res => {
+                        this.running = true
+                        this.emit("ready")
+                    })
                 })
 
             } else if (data.type === "keepalive") {
@@ -178,12 +179,13 @@ class Krist extends EventEmitter {
         })
     }
 
-    login(privkey) {
+    login(opts = {}) {
         return new Promise((resolve, reject) => {
-            this._wsSend({"type": "login", "privatekey": privkey})
+            this._wsSend({"type": "login", "privatekey": opts.private_key})
             .then(res => {
                 this.address = new Address(res.address)
                 this.isGuest = res.isGuest
+                this.private_key = opts.private_key
                 resolve(this.address)
             })
             .catch(reject)
@@ -202,25 +204,29 @@ class Krist extends EventEmitter {
         })
     }
 
-    getAddress(address) {
+    getAddress(opts = {}) {
+        if (!opts.address) { opts.address = this.address ? this.address.address : undefined }
         return new Promise((resolve, reject) => {
-            this._wsSend({"type": "address", "address": address})
+            this._wsSend({"type": "address", "address": opts.address})
             .then(res => resolve(new Address(res.address)))
             .catch(reject)
         })
     }
 
-    getRichest(top = 50) {
+    getRichest(opts = { top: 50 }) {
         return new Promise((resolve, reject) => {
-            this._httpSend(`/addresses/rich?limit=${top}`)
+            this._httpSend(`/addresses/rich?limit=${opts.top}`)
             .then(res => resolve(res.addresses.map(i => new Address(i))))
             .catch(reject)
         })
     }
 
-    getTransactions(address = this.address.address, limit) {
+    getTransactions(opts = {}) {
+        if (!opts.address) { opts.address = this.address ? this.address.address : undefined }
+        if (!opts.address) { return Promise.reject({ ok: false, error: "address_not_specified" }) }
+
         return new Promise((resolve, reject) => {
-            this._httpSend(`/addresses/${address}/transactions?excludeMined=true` + (limit ? `&limit=${limit}` : ""))
+            this._httpSend(`/addresses/${opts.address}/transactions?excludeMined=true` + (opts.limit ? `&limit=${opts.limit}` : ""))
             .then(res => {
                 delete res.ok
                 res.transactions = res.transactions.map(tx => new Transaction(tx))
@@ -230,17 +236,20 @@ class Krist extends EventEmitter {
         })
     }
 
-    getName(name) {
+    getName(opts = {}) {
+        if (!opts.name) { return Promise.reject({ ok: false, error: "name_not_specified" }) }
         return new Promise((resolve, reject) => {
-            this._httpSend(`/names/${name}`)
+            this._httpSend(`/names/${opts.name}`)
             .then(res => resolve(new Name(res.name)))
             .catch(reject)
         })
     }
 
-    getNames(address = this.address.address, limit) {
+    getNames(opts = {}) {
+        if (!opts.address) { opts.address = this.address ? this.address.address : undefined }
+        if (!opts.address) { return Promise.reject({ ok: false, error: "address_not_specified" }) }
         return new Promise((resolve, reject) => {
-            this._httpSend(`/addresses/${address}/names` + (limit ? `?limit=${limit}` : ""))
+            this._httpSend(`/addresses/${opts.address}/names` + (opts.limit ? `?limit=${opts.limit}` : ""))
             .then(res => {
                 delete res.ok
                 res.names = res.names.map(name => new Name(name))
@@ -250,9 +259,11 @@ class Krist extends EventEmitter {
         })
     }
 
-    getStake(address = this.address.address) {
+    getStake(opts = {}) {
+        if (!opts.address) { opts.address = this.address ? this.address.address : undefined }
+        if (!opts.address) { return Promise.reject({ ok: false, error: "address_not_specified" }) }
         return new Promise((resolve, reject) => {
-            this._wsSend({"type": "stake", "address": address})
+            this._wsSend({"type": "stake", "address": opts.address})
             .then(res => {
                 let stake = new Stake(res.stake)
                 if (stake.owner.address === this.address.address) { this.currentStake = stake }
@@ -262,9 +273,9 @@ class Krist extends EventEmitter {
         })
     }
 
-    getStakes(limit) {
+    getStakes(opts = {}) {
         return new Promise((resolve, reject) => {
-            this._httpSend("/staking" + (limit ? `?limit=${limit}` : ""))
+            this._httpSend("/staking" + (opts.limit ? `?limit=${opts.limit}` : ""))
             .then(res => {
                 delete res.ok
                 res.stakes = res.stakes.map(stake => new Stake(stake))
@@ -290,25 +301,28 @@ class Krist extends EventEmitter {
         })
     }
 
-    registerName(name = "") {
+    registerName(opts = { name: "" }) {
+        if (!opts.name) { return Promise.reject({ ok: false, error: "name_not_specified" }) }
         return new Promise((resolve, reject) => {
-            this._httpSend(`/names/${name}`, {"privatekey": this.private_key})
+            this._httpSend(`/names/${opts.name}`, {"privatekey": this.private_key})
             .then(resolve)
             .catch(reject)
         })
     }
 
-    transferName(name = "", recipient = "") {
+    transferName(opts = { name: "" }) {
+        if (!opts.name) { return Promise.reject({ ok: false, error: "name_not_specified" }) }
         return new Promise((resolve, reject) => {
-            this._httpSend(`/names/${name}/transfer`, {"privatekey": this.private_key, "address": recipient})
+            this._httpSend(`/names/${opts.name}/transfer`, {"privatekey": this.private_key, "address": opts.recipient})
             .then(res => resolve(new Name(res.name)))
             .catch(reject)
         })
     }
 
-    updateName(name = "", record) {
+    updateName(opts = { name: "" }) {
+        if (!opts.name) { return Promise.reject({ ok: false, error: "name_not_specified" }) }
         return new Promise((resolve, reject) => {
-            this._httpSend(`/names/${name}/update`, {"privatekey": this.private_key, "a": record})
+            this._httpSend(`/names/${opts.name}/update`, {"privatekey": this.private_key, "a": opts.record})
             .then(res => resolve(new Name(res.name)))
             .catch(reject)
         })
@@ -323,12 +337,13 @@ class Krist extends EventEmitter {
         })
     }
 
-    submitBlock(nonce, address) {
+    submitBlock(opts = {}) {
         return new Promise((resolve, reject) => {
-            this._wsSend({"type": "submit_block", "nonce": nonce, "address": address})
+            this._wsSend({"type": "submit_block", "nonce": opts.nonce, "address": opts.address})
             .then(res => {
                 res.success ? resolve(res) : reject(res)
             })
+            .catch(reject)
         })
     }
     
@@ -348,17 +363,17 @@ class Krist extends EventEmitter {
         })
     }
 
-    depositStake(amount) {
+    depositStake(opts = {}) {
         return new Promise((resolve, reject) => {
-            this._httpSend("/staking", {"amount": amount, "privatekey": this.private_key})
+            this._httpSend("/staking", {"amount": opts.amount, "privatekey": this.private_key})
             .then(res => resolve(new Stake(res.stake)))
             .catch(reject)
         })
     }
 
-    withdrawStake(amount) {
+    withdrawStake(opts = {}) {
         return new Promise((resolve, reject) => {
-            this._httpSend("/staking/withdraw", {"amount": amount, "privatekey": this.private_key})
+            this._httpSend("/staking/withdraw", {"amount": opts.amount, "privatekey": this.private_key})
             .then(res => resolve(new Stake(res.stake)))
             .catch(reject)
         })
